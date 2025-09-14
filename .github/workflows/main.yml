@@ -1,4 +1,4 @@
-name: RDP-HighPerf
+name: RDP-Tailscale
 
 on:
   workflow_dispatch:
@@ -6,57 +6,54 @@ on:
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
-      - name: Enable RDP and Optimize System
+      - name: Enable RDP
         run: |
-          # เปิด RDP
+          # เปิด Remote Desktop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          
-          # ปิด services ที่ไม่จำเป็น เพื่อรีด CPU/RAM
-          Stop-Service -Name "wuauserv" -Force   # Windows Update
-          Stop-Service -Name "SysMain" -Force    # Superfetch
-          Stop-Service -Name "DiagTrack" -Force  # Telemetry
-          
-          # ปิด sleep/hibernation
-          powercfg -h off
+          Restart-Service -Name TermService -Force
 
-      - name: Create High-Privilege RDP User
+      - name: Create RDP User
         run: |
-          $password = "Rdp$((New-Guid).Guid.Substring(0,8))!"
+          $username = "RDP"
+          $password = "RDP"
           $sec = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser "RDPUser" -Password $sec -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser $username -Password $sec -AccountNeverExpires
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $out = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest $url -OutFile $out
-          Start-Process msiexec.exe -ArgumentList "/i $out /quiet /norestart" -Wait
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile tailscale.msi
+          Start-Process msiexec.exe -ArgumentList '/i tailscale.msi /qn' -Wait
+          setx PATH "$env:ProgramFiles\Tailscale;$env:PATH"
 
-      - name: Connect Tailscale
+      - name: Start Tailscale
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-${{ github.run_id }}
-          $tsip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          echo "TAILSCALE_IP=$tsip" >> $env:GITHUB_ENV
+          # Auth ผ่าน Ephemeral key (สร้างจาก admin.tailscale.com → Keys)
+          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-rdp --accept-routes
+          tailscale ip -4 | Out-File ip.txt
+          Get-Content ip.txt
 
-      - name: Show RDP Credentials
+      - name: Show Info
         run: |
+          $ip = Get-Content ip.txt
           echo "============================="
-          echo "   Tailscale RDP Connected   "
+          echo "   RDP via Tailscale Ready   "
           echo "============================="
-          echo "IP Address: $env:TAILSCALE_IP"
-          echo "Username:   RDPUser"
+          echo "Connect to: $ip"
+          echo "Username:   $env:RDP_USERNAME"
           echo "Password:   $env:RDP_PASSWORD"
           echo "============================="
 
-      - name: Keep Session Alive
+      - name: Keep Alive
         run: |
           while ($true) {
             Write-Host "[$(Get-Date)] RDP session active"
